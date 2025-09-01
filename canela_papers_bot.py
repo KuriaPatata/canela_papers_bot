@@ -6,7 +6,6 @@ import sqlite3
 
 TOKEN = os.getenv("TOKEN")  # stored in Railway environment variables
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-
 DB_FILE = "bot_data.db"
 
 # ---------- Database Setup ----------
@@ -108,11 +107,9 @@ async def scan_feeds(channel):
     keywords = get_keywords()
     feeds = get_feeds()
     new_count = 0
-
     if not feeds:
         await channel.send("⚠️ No feeds configured. Use `!addfeed URL` to add one.")
         return
-
     for feed_url in feeds:
         feed = feedparser.parse(feed_url)
         for entry in feed.entries:
@@ -122,9 +119,7 @@ async def scan_feeds(channel):
                     await channel.send(f"📄 **{entry.title}**\n{entry.link}")
                     mark_seen(entry.link)
                     new_count += 1
-
-    if new_count == 0:
-        await channel.send("✅ No new matching papers found.")
+    await channel.send("✅ Scan complete." if new_count > 0 else "✅ No new matching papers found.")
 
 async def scheduled_check():
     await client.wait_for("ready")
@@ -138,8 +133,11 @@ async def on_message(message: discord.Message):
     if message.author == client.user:
         return
 
-    content = message.content.strip()
+    # Restrict commands to the specified channel only
+    if message.channel.id != CHANNEL_ID:
+        return
 
+    content = message.content.strip()
     # Keyword management
     if content.startswith("!addkeyword "):
         kw = content[len("!addkeyword "):].strip()
@@ -148,37 +146,31 @@ async def on_message(message: discord.Message):
             await message.channel.send(f"✅ Added keyword: `{kw}`")
         else:
             await message.channel.send("⚠️ Provide a keyword.")
-
     elif content.startswith("!removekeyword "):
         kw = content[len("!removekeyword "):].strip()
         remove_keyword(kw)
         await message.channel.send(f"🗑️ Removed keyword: `{kw}`")
-
     elif content.startswith("!listkeywords"):
         kws = get_keywords()
         if kws:
             await message.channel.send("🔑 Keywords:\n" + ", ".join(f"`{kw}`" for kw in kws))
         else:
             await message.channel.send("No keywords set.")
-
     # Feed management
     elif content.startswith("!addfeed "):
         url = content[len("!addfeed "):].strip()
         add_feed(url)
         await message.channel.send(f"🌐 Added feed: `{url}`")
-
     elif content.startswith("!removefeed "):
         url = content[len("!removefeed "):].strip()
         remove_feed(url)
         await message.channel.send(f"🗑️ Removed feed: `{url}`")
-
     elif content.startswith("!listfeeds"):
         feeds = get_feeds()
         if feeds:
             await message.channel.send("🌐 Feeds:\n" + "\n".join(f"`{url}`" for url in feeds))
         else:
             await message.channel.send("No feeds set.")
-
     # Interval
     elif content.startswith("!setinterval "):
         try:
@@ -190,11 +182,11 @@ async def on_message(message: discord.Message):
                 await message.channel.send("⚠️ Interval must be > 0.")
         except ValueError:
             await message.channel.send("⚠️ Invalid number.")
-
     # Manual scan
     elif content.startswith("!scan"):
         await message.channel.send("🔍 Scanning now...")
         await scan_feeds(message.channel)
+        # The scan_feeds function itself sends a completion message
 
 @client.event
 async def on_ready():
