@@ -1,7 +1,7 @@
-# canela_papers_bot
+# daily_papers_bot
 A discord bot that searches for scientific papers in rss feed using customizable keywords.
 
-Canela Papers Bot 📚🤖
+Daily Papers Bot 📚🤖
 
 A Discord bot that searches for the latest scientific papers from RSS feeds using customizable keywords.
 Stay updated on research that matters to you – directly inside your Discord server!
@@ -22,8 +22,8 @@ Easy setup and deployment.
 
 Clone the repository
 
-git clone https://github.com/your-username/canela_papers_bot.git
-cd canela_papers_bot
+git clone https://github.com/your-username/daily_papers_bot.git
+cd daily_papers_bot
 
 
 Set up a virtual environment (recommended)
@@ -47,7 +47,7 @@ Add your Discord bot token:
 DISCORD_TOKEN=your_discord_token_here
 
 ▶️ Running the Bot
-python bot.py
+python daily_papers_bot.py
 
 📜 Commands
 
