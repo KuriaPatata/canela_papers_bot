@@ -133,7 +133,7 @@ async def scheduled_check():
                     break
             if channel:
                 await scan_feeds(channel)
-        await asyncio.sleep(3600)  # Run hourly, or adjust as needed
+        await asyncio.sleep(43200)  # Run hourly, or adjust as needed
 
 @client.event
 async def on_message(message: discord.Message):
@@ -204,3 +204,4 @@ async def on_ready():
 # Initialize Db and run bot
 init_db()
 client.run(TOKEN)
+
