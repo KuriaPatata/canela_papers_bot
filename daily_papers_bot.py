@@ -7,19 +7,39 @@ import sqlite3
 TOKEN = os.getenv("TOKEN")  # your bot token in Railway or env
 DB_FILE = "bot_data.db"
 
+# Default config
+DEFAULT_INTERVAL = 12  # hours
+DEFAULT_FEEDS = [
+    "https://www.nature.com/nature.rss",
+    "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science",
+    "https://export.arxiv.org/rss/physics",
+    "https://export.arxiv.org/rss/cond-mat",
+    "https://export.arxiv.org/rss/quant-ph",
+    "https://export.arxiv.org/rss/math",
+    "https://export.arxiv.org/rss/cs"
+]
+
 # ---------- Database Setup ----------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # keywords per guild
     c.execute("CREATE TABLE IF NOT EXISTS keywords (guild_id INTEGER, word TEXT, UNIQUE(guild_id, word))")
-    # seen links per guild
     c.execute("CREATE TABLE IF NOT EXISTS seen_links (guild_id INTEGER, link TEXT, UNIQUE(guild_id, link))")
-    # feeds per guild
     c.execute("CREATE TABLE IF NOT EXISTS feeds (guild_id INTEGER, url TEXT, UNIQUE(guild_id, url))")
-    # settings per guild
     c.execute("CREATE TABLE IF NOT EXISTS settings (guild_id INTEGER, key TEXT, value TEXT, UNIQUE(guild_id, key))")
     conn.commit()
+    conn.close()
+
+def ensure_default_feeds(guild_id):
+    """If a guild has no feeds yet, insert default feeds."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM feeds WHERE guild_id=?", (guild_id,))
+    count = c.fetchone()[0]
+    if count == 0:
+        for url in DEFAULT_FEEDS:
+            c.execute("INSERT OR IGNORE INTO feeds (guild_id, url) VALUES (?, ?)", (guild_id, url))
+        conn.commit()
     conn.close()
 
 def get_keywords(guild_id):
@@ -87,7 +107,7 @@ def get_interval(guild_id):
     c.execute("SELECT value FROM settings WHERE guild_id=? AND key='interval_hours'", (guild_id,))
     row = c.fetchone()
     conn.close()
-    return int(row[0]) if row else 24  # default 24h
+    return int(row[0]) if row else DEFAULT_INTERVAL
 
 def set_interval(guild_id, hours):
     conn = sqlite3.connect(DB_FILE)
@@ -103,18 +123,16 @@ client = discord.Client(intents=intents)
 
 async def scan_feeds(channel):
     guild_id = channel.guild.id
+    ensure_default_feeds(guild_id)  # auto-add defaults if none
     keywords = get_keywords(guild_id)
     feeds = get_feeds(guild_id)
     new_count = 0
-    if not feeds:
-        await channel.send("⚠️ No feeds configured. Use `!addfeed URL` to add one.")
-        return
     for feed_url in feeds:
         feed = feedparser.parse(feed_url)
         for entry in feed.entries:
             if not is_seen(guild_id, entry.link):
                 title = entry.title.lower()
-                if any(kw.lower() in title for kw in keywords):
+                if not keywords or any(kw.lower() in title for kw in keywords):
                     await channel.send(f"📄 **{entry.title}**\n{entry.link}")
                     mark_seen(guild_id, entry.link)
                     new_count += 1
@@ -124,8 +142,7 @@ async def scheduled_check():
     await client.wait_until_ready()
     while not client.is_closed():
         for guild in client.guilds:
-            # Try to find the bot's designated channel per guild (here channels where the bot can send messages)
-            # For simplicity, using the first text channel where the bot has send permission
+            # Find a text channel where bot can send messages
             channel = None
             for ch in guild.text_channels:
                 if ch.permissions_for(guild.me).send_messages:
@@ -133,38 +150,33 @@ async def scheduled_check():
                     break
             if channel:
                 await scan_feeds(channel)
-        await asyncio.sleep(43200)  # Run hourly, or adjust as needed
+        await asyncio.sleep(DEFAULT_INTERVAL * 3600)
+
+@client.event
+async def on_guild_join(guild):
+    """When bot joins a new server, add default feeds."""
+    ensure_default_feeds(guild.id)
 
 @client.event
 async def on_message(message: discord.Message):
-    if message.author == client.user:
-        return
-    if not message.guild:  # ignore DMs
+    if message.author == client.user or not message.guild:
         return
 
     content = message.content.strip()
     guild_id = message.guild.id
 
-    # Commands work only in channels where bot has permissions, no hard restriction currently
-    # Keyword management
     if content.startswith("!addkeyword "):
         kw = content[len("!addkeyword "):].strip()
         if kw:
             add_keyword(guild_id, kw)
             await message.channel.send(f"✅ Added keyword: `{kw}`")
-        else:
-            await message.channel.send("⚠️ Provide a keyword.")
     elif content.startswith("!removekeyword "):
         kw = content[len("!removekeyword "):].strip()
         remove_keyword(guild_id, kw)
         await message.channel.send(f"🗑️ Removed keyword: `{kw}`")
     elif content.startswith("!listkeywords"):
         kws = get_keywords(guild_id)
-        if kws:
-            await message.channel.send("🔑 Keywords:\n" + ", ".join(f"`{kw}`" for kw in kws))
-        else:
-            await message.channel.send("No keywords set.")
-    # Feed management
+        await message.channel.send("🔑 Keywords:\n" + ", ".join(f"`{kw}`" for kw in kws) if kws else "No keywords set.")
     elif content.startswith("!addfeed "):
         url = content[len("!addfeed "):].strip()
         add_feed(guild_id, url)
@@ -175,33 +187,35 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"🗑️ Removed feed: `{url}`")
     elif content.startswith("!listfeeds"):
         feeds = get_feeds(guild_id)
-        if feeds:
-            await message.channel.send("🌐 Feeds:\n" + "\n".join(f"`{url}`" for url in feeds))
-        else:
-            await message.channel.send("No feeds set.")
-    # Interval
+        await message.channel.send("🌐 Feeds:\n" + "\n".join(f"`{url}`" for url in feeds) if feeds else "No feeds set.")
     elif content.startswith("!setinterval "):
         try:
             hours = int(content[len("!setinterval "):].strip())
             if hours > 0:
                 set_interval(guild_id, hours)
                 await message.channel.send(f"⏱️ Interval set to {hours} hours.")
-            else:
-                await message.channel.send("⚠️ Interval must be > 0.")
         except ValueError:
             await message.channel.send("⚠️ Invalid number.")
-    # Manual scan
     elif content.startswith("!scan"):
         await message.channel.send("🔍 Scanning now...")
         await scan_feeds(message.channel)
-        # Completion message sent inside scan_feeds()
+    elif content.startswith("!resetfeeds"):
+        # Remove all current feeds for this guild
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("DELETE FROM feeds WHERE guild_id=?", (guild_id,))
+        conn.commit()
+        conn.close()
+
+        # Re-insert default feeds
+        ensure_default_feeds(guild_id)
+        await message.channel.send("♻️ Feeds have been reset to default.")
 
 @client.event
 async def on_ready():
-    print(f"Logged in as {client.user}")
+    print(f"✅ Logged in as {client.user}")
     client.loop.create_task(scheduled_check())
 
-# Initialize Db and run bot
+# Initialize DB and run bot
 init_db()
 client.run(TOKEN)
-
