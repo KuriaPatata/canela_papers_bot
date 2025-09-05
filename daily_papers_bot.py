@@ -121,21 +121,28 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
+# Track currently running scans per guild
+current_scans = {}  # guild_id -> asyncio.Task
+
 async def scan_feeds(channel):
     guild_id = channel.guild.id
-    ensure_default_feeds(guild_id)  # auto-add defaults if none
+    ensure_default_feeds(guild_id)
     keywords = get_keywords(guild_id)
     feeds = get_feeds(guild_id)
     new_count = 0
-    for feed_url in feeds:
-        feed = feedparser.parse(feed_url)
-        for entry in feed.entries:
-            if not is_seen(guild_id, entry.link):
-                title = entry.title.lower()
-                if not keywords or any(kw.lower() in title for kw in keywords):
-                    await channel.send(f"📄 **{entry.title}**\n{entry.link}")
-                    mark_seen(guild_id, entry.link)
-                    new_count += 1
+    try:
+        for feed_url in feeds:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries:
+                if not is_seen(guild_id, entry.link):
+                    title = entry.title.lower()
+                    if not keywords or any(kw.lower() in title for kw in keywords):
+                        await channel.send(f"📄 **{entry.title}**\n{entry.link}")
+                        mark_seen(guild_id, entry.link)
+                        new_count += 1
+    except asyncio.CancelledError:
+        await channel.send("⚠️ Scan cancelled.")
+        return
     await channel.send("✅ Scan complete." if new_count > 0 else "✅ No new matching papers found.")
 
 async def scheduled_check():
@@ -149,7 +156,11 @@ async def scheduled_check():
                     channel = ch
                     break
             if channel:
-                await scan_feeds(channel)
+                task = asyncio.create_task(scan_feeds(channel))
+                current_scans[guild.id] = task
+                def done_callback(t):
+                    current_scans.pop(guild.id, None)
+                task.add_done_callback(done_callback)
         await asyncio.sleep(DEFAULT_INTERVAL * 3600)
 
 @client.event
@@ -198,16 +209,24 @@ async def on_message(message: discord.Message):
             await message.channel.send("⚠️ Invalid number.")
     elif content.startswith("!scan"):
         await message.channel.send("🔍 Scanning now...")
-        await scan_feeds(message.channel)
+        task = asyncio.create_task(scan_feeds(message.channel))
+        current_scans[guild_id] = task
+        def done_callback(t):
+            current_scans.pop(guild_id, None)
+        task.add_done_callback(done_callback)
+    elif content.startswith("!stopcurrentscan"):
+        task = current_scans.get(guild_id)
+        if task and not task.done():
+            task.cancel()
+            await message.channel.send("⏹️ Current scan stopped.")
+        else:
+            await message.channel.send("⚠️ No scan is running right now.")
     elif content.startswith("!resetfeeds"):
-        # Remove all current feeds for this guild
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("DELETE FROM feeds WHERE guild_id=?", (guild_id,))
         conn.commit()
         conn.close()
-
-        # Re-insert default feeds
         ensure_default_feeds(guild_id)
         await message.channel.send("♻️ Feeds have been reset to default.")
 
