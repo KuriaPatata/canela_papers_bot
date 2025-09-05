@@ -121,28 +121,21 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# Track currently running scans per guild
-current_scans = {}  # guild_id -> asyncio.Task
-
 async def scan_feeds(channel):
     guild_id = channel.guild.id
-    ensure_default_feeds(guild_id)
+    ensure_default_feeds(guild_id)  # auto-add defaults if none
     keywords = get_keywords(guild_id)
     feeds = get_feeds(guild_id)
     new_count = 0
-    try:
-        for feed_url in feeds:
-            feed = feedparser.parse(feed_url)
-            for entry in feed.entries:
-                if not is_seen(guild_id, entry.link):
-                    title = entry.title.lower()
-                    if not keywords or any(kw.lower() in title for kw in keywords):
-                        await channel.send(f"📄 **{entry.title}**\n{entry.link}")
-                        mark_seen(guild_id, entry.link)
-                        new_count += 1
-    except asyncio.CancelledError:
-        await channel.send("⚠️ Scan cancelled.")
-        return
+    for feed_url in feeds:
+        feed = feedparser.parse(feed_url)
+        for entry in feed.entries:
+            if not is_seen(guild_id, entry.link):
+                title = entry.title.lower()
+                if not keywords or any(kw.lower() in title for kw in keywords):
+                    await channel.send(f"📄 **{entry.title}**\n{entry.link}")
+                    mark_seen(guild_id, entry.link)
+                    new_count += 1
     await channel.send("✅ Scan complete." if new_count > 0 else "✅ No new matching papers found.")
 
 async def scheduled_check():
@@ -156,11 +149,7 @@ async def scheduled_check():
                     channel = ch
                     break
             if channel:
-                task = asyncio.create_task(scan_feeds(channel))
-                current_scans[guild.id] = task
-                def done_callback(t):
-                    current_scans.pop(guild.id, None)
-                task.add_done_callback(done_callback)
+                await scan_feeds(channel)
         await asyncio.sleep(DEFAULT_INTERVAL * 3600)
 
 @client.event
@@ -176,29 +165,49 @@ async def on_message(message: discord.Message):
     content = message.content.strip()
     guild_id = message.guild.id
 
+    # --- Keyword commands (support multiple) ---
     if content.startswith("!addkeyword "):
-        kw = content[len("!addkeyword "):].strip()
-        if kw:
-            add_keyword(guild_id, kw)
-            await message.channel.send(f"✅ Added keyword: `{kw}`")
+        kws = content[len("!addkeyword "):].split(",")
+        added = []
+        for kw in kws:
+            kw = kw.strip()
+            if kw:
+                add_keyword(guild_id, kw)
+                added.append(kw)
+        if added:
+            await message.channel.send(f"✅ Added keywords: {', '.join(f'`{k}`' for k in added)}")
+
     elif content.startswith("!removekeyword "):
-        kw = content[len("!removekeyword "):].strip()
-        remove_keyword(guild_id, kw)
-        await message.channel.send(f"🗑️ Removed keyword: `{kw}`")
+        kws = content[len("!removekeyword "):].split(",")
+        removed = []
+        for kw in kws:
+            kw = kw.strip()
+            if kw:
+                remove_keyword(guild_id, kw)
+                removed.append(kw)
+        if removed:
+            await message.channel.send(f"🗑️ Removed keywords: {', '.join(f'`{k}`' for k in removed)}")
+
     elif content.startswith("!listkeywords"):
         kws = get_keywords(guild_id)
         await message.channel.send("🔑 Keywords:\n" + ", ".join(f"`{kw}`" for kw in kws) if kws else "No keywords set.")
+
+    # --- Feed commands ---
     elif content.startswith("!addfeed "):
         url = content[len("!addfeed "):].strip()
         add_feed(guild_id, url)
         await message.channel.send(f"🌐 Added feed: `{url}`")
+
     elif content.startswith("!removefeed "):
         url = content[len("!removefeed "):].strip()
         remove_feed(guild_id, url)
         await message.channel.send(f"🗑️ Removed feed: `{url}`")
+
     elif content.startswith("!listfeeds"):
         feeds = get_feeds(guild_id)
         await message.channel.send("🌐 Feeds:\n" + "\n".join(f"`{url}`" for url in feeds) if feeds else "No feeds set.")
+
+    # --- Interval ---
     elif content.startswith("!setinterval "):
         try:
             hours = int(content[len("!setinterval "):].strip())
@@ -207,20 +216,12 @@ async def on_message(message: discord.Message):
                 await message.channel.send(f"⏱️ Interval set to {hours} hours.")
         except ValueError:
             await message.channel.send("⚠️ Invalid number.")
+
+    # --- Scan & Reset ---
     elif content.startswith("!scan"):
         await message.channel.send("🔍 Scanning now...")
-        task = asyncio.create_task(scan_feeds(message.channel))
-        current_scans[guild_id] = task
-        def done_callback(t):
-            current_scans.pop(guild_id, None)
-        task.add_done_callback(done_callback)
-    elif content.startswith("!stopcurrentscan"):
-        task = current_scans.get(guild_id)
-        if task and not task.done():
-            task.cancel()
-            await message.channel.send("⏹️ Current scan stopped.")
-        else:
-            await message.channel.send("⚠️ No scan is running right now.")
+        await scan_feeds(message.channel)
+
     elif content.startswith("!resetfeeds"):
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
