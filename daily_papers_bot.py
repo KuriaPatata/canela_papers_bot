@@ -19,6 +19,9 @@ DEFAULT_FEEDS = [
     "https://export.arxiv.org/rss/cs"
 ]
 
+# Global flag to stop scan
+stop_current_scan = False
+
 # ---------- Database Setup ----------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -31,7 +34,6 @@ def init_db():
     conn.close()
 
 def ensure_default_feeds(guild_id):
-    """If a guild has no feeds yet, insert default feeds."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM feeds WHERE guild_id=?", (guild_id,))
@@ -121,28 +123,51 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-async def scan_feeds(channel):
+# ---------- Feed scanning ----------
+async def scan_feeds(channel, require_all_keywords=False):
+    global stop_current_scan
+    stop_current_scan = False  # reset flag
+
     guild_id = channel.guild.id
-    ensure_default_feeds(guild_id)  # auto-add defaults if none
+    ensure_default_feeds(guild_id)
     keywords = get_keywords(guild_id)
     feeds = get_feeds(guild_id)
     new_count = 0
+
     for feed_url in feeds:
+        if stop_current_scan:
+            await channel.send("⏹️ Scan stopped.")
+            return
+
         feed = feedparser.parse(feed_url)
         for entry in feed.entries:
+            if stop_current_scan:
+                await channel.send("⏹️ Scan stopped.")
+                return
+
             if not is_seen(guild_id, entry.link):
                 title = entry.title.lower()
-                if not keywords or any(kw.lower() in title for kw in keywords):
+
+                if not keywords:
+                    send_paper = True
+                else:
+                    kws_lower = [kw.lower() for kw in keywords]
+                    if require_all_keywords:
+                        send_paper = all(kw in title for kw in kws_lower)
+                    else:
+                        send_paper = any(kw in title for kw in kws_lower)
+
+                if send_paper:
                     await channel.send(f"📄 **{entry.title}**\n{entry.link}")
                     mark_seen(guild_id, entry.link)
                     new_count += 1
+
     await channel.send("✅ Scan complete." if new_count > 0 else "✅ No new matching papers found.")
 
 async def scheduled_check():
     await client.wait_until_ready()
     while not client.is_closed():
         for guild in client.guilds:
-            # Find a text channel where bot can send messages
             channel = None
             for ch in guild.text_channels:
                 if ch.permissions_for(guild.me).send_messages:
@@ -154,7 +179,6 @@ async def scheduled_check():
 
 @client.event
 async def on_guild_join(guild):
-    """When bot joins a new server, add default feeds."""
     ensure_default_feeds(guild.id)
 
 @client.event
@@ -165,7 +189,7 @@ async def on_message(message: discord.Message):
     content = message.content.strip()
     guild_id = message.guild.id
 
-    # --- Keyword commands (support multiple) ---
+    # --- Keywords ---
     if content.startswith("!addkeyword "):
         kws = content[len("!addkeyword "):].split(",")
         added = []
@@ -192,7 +216,7 @@ async def on_message(message: discord.Message):
         kws = get_keywords(guild_id)
         await message.channel.send("🔑 Keywords:\n" + ", ".join(f"`{kw}`" for kw in kws) if kws else "No keywords set.")
 
-    # --- Feed commands ---
+    # --- Feeds ---
     elif content.startswith("!addfeed "):
         url = content[len("!addfeed "):].strip()
         add_feed(guild_id, url)
@@ -217,11 +241,22 @@ async def on_message(message: discord.Message):
         except ValueError:
             await message.channel.send("⚠️ Invalid number.")
 
-    # --- Scan & Reset ---
+    # --- Scan & Stop ---
     elif content.startswith("!scan"):
+        # allow optional AND/OR argument: !scan and / !scan or
+        parts = content.split()
+        require_all = False
+        if len(parts) > 1 and parts[1].lower() == "and":
+            require_all = True
         await message.channel.send("🔍 Scanning now...")
-        await scan_feeds(message.channel)
+        await scan_feeds(message.channel, require_all_keywords=require_all)
 
+    elif content.startswith("!stopscan"):
+        global stop_current_scan
+        stop_current_scan = True
+        await message.channel.send("⏹️ Stopping current scan...")
+
+    # --- Reset feeds ---
     elif content.startswith("!resetfeeds"):
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
